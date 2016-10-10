@@ -24,6 +24,7 @@ pub struct Config {
     pub sched_msg_per_tick: usize,
     pub sched_concurrency: usize,
     pub sched_worker_pool_size: usize,
+    pub sched_pro_exec_gc: bool,
 }
 
 impl Default for Config {
@@ -34,6 +35,7 @@ impl Default for Config {
             sched_msg_per_tick: DEFAULT_SCHED_MSG_PER_TICK,
             sched_concurrency: DEFAULT_SCHED_CONCURRENCY,
             sched_worker_pool_size: DEFAULT_SCHED_WORKER_POOL_SIZE,
+            sched_pro_exec_gc: true,
         }
     }
 }

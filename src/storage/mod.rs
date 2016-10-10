@@ -272,9 +272,14 @@ impl Storage {
         let mut el = handle.event_loop.take().unwrap();
         let sched_concurrency = config.sched_concurrency;
         let sched_worker_pool_size = config.sched_worker_pool_size;
+        let sched_pro_exec_gc = config.sched_pro_exec_gc;
         let ch = self.sendch.clone();
         let h = try!(builder.spawn(move || {
-            let mut sched = Scheduler::new(engine, ch, sched_concurrency, sched_worker_pool_size);
+            let mut sched = Scheduler::new(engine,
+                                           ch,
+                                           sched_concurrency,
+                                           sched_pro_exec_gc,
+                                           sched_worker_pool_size);
             if let Err(e) = el.run(&mut sched) {
                 panic!("scheduler run err:{:?}", e);
             }
