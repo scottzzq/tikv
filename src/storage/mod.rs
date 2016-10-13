@@ -269,7 +269,7 @@ impl Storage {
 
         let engine = self.engine.clone();
         let builder = thread::Builder::new().name(thd_name!("storage-scheduler"));
-        let mut el = handle.event_loop.take().unwrap();
+        let el = handle.event_loop.take().unwrap();
         let sched_concurrency = config.sched_concurrency;
         let sched_worker_pool_size = config.sched_worker_pool_size;
         let sched_pro_exec_gc = config.sched_pro_exec_gc;
@@ -280,8 +280,9 @@ impl Storage {
                                            sched_concurrency,
                                            sched_pro_exec_gc,
                                            sched_worker_pool_size);
-            if let Err(e) = el.run(&mut sched) {
-                panic!("scheduler run err:{:?}", e);
+            let mut event_loop = el;
+            if let Err(e) = sched.run(&mut event_loop) {
+                panic!("scheduler run err: {:?}", e);
             }
             info!("scheduler stopped");
         }));
