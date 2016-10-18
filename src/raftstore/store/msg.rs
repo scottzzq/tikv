@@ -70,6 +70,11 @@ pub enum Msg {
         region_id: u64,
         snap: Option<Snapshot>,
     },
+
+    CompactRegion {
+        region_id: u64,
+        cfs: Vec<&'static str>,
+    },
 }
 
 impl fmt::Debug for Msg {
@@ -105,6 +110,12 @@ impl fmt::Debug for Msg {
                        "SnapGenRes [region_id: {}, is_success: {}]",
                        region_id,
                        snap.is_some())
+            }
+            Msg::CompactRegion { region_id, ref cfs } => {
+                write!(fmt,
+                       "CompactRegion [region_id: {}, cfs: {:?}]",
+                       region_id,
+                       cfs)
             }
         }
     }

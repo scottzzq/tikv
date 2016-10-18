@@ -27,6 +27,7 @@ use tempdir::TempDir;
 enum Task {
     Write(Vec<Modify>, Callback<()>),
     Snapshot(Callback<Box<Snapshot>>),
+    Compact(Vec<CfName>),
 }
 
 impl Display for Task {
@@ -34,6 +35,7 @@ impl Display for Task {
         match *self {
             Task::Write(..) => write!(f, "write task"),
             Task::Snapshot(_) => write!(f, "snapshot task"),
+            Task::Compact(_) => write!(f, "compact task"),
         }
     }
 }
@@ -45,6 +47,7 @@ impl Runnable<Task> for Runner {
         match t {
             Task::Write(modifies, cb) => cb(write_modifies(&self.0, modifies)),
             Task::Snapshot(cb) => cb(Ok(box RocksSnapshot::new(self.0.clone()))),
+            Task::Compact(cfs) => compact_cfs(&self.0, cfs),
         }
     }
 }
@@ -134,6 +137,15 @@ fn write_modifies(db: &DB, modifies: Vec<Modify>) -> Result<()> {
     Ok(())
 }
 
+fn compact_cfs(db: &DB, cfs: Vec<CfName>) {
+    for cf in cfs {
+        match rocksdb::get_cf_handle(db, &cf) {
+            Ok(h) => db.compact_range_cf(h, None, None),
+            Err(_) => error!("handle not found for cf {}", &cf),
+        }
+    }
+}
+
 impl Engine for EngineRocksdb {
     fn async_write(&self, _: &Context, modifies: Vec<Modify>, cb: Callback<()>) -> Result<()> {
         box_try!(self.sched.schedule(Task::Write(modifies, cb)));
@@ -142,6 +154,11 @@ impl Engine for EngineRocksdb {
 
     fn async_snapshot(&self, _: &Context, cb: Callback<Box<Snapshot>>) -> Result<()> {
         box_try!(self.sched.schedule(Task::Snapshot(cb)));
+        Ok(())
+    }
+
+    fn compact(&self, _: &Context, cfs: Vec<CfName>) -> Result<()> {
+        box_try!(self.sched.schedule(Task::Compact(cfs)));
         Ok(())
     }
 

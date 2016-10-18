@@ -1386,6 +1386,23 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         self.register_snap_mgr_gc_tick(event_loop);
     }
 
+    fn on_compact_region_cf(&mut self, region_id: u64, cfs: Vec<&str>) {
+        if let Some(p) = self.region_peers.get(&region_id) {
+            let start = keys::enc_start_key(p.region());
+            let end = keys::enc_end_key(p.region());
+            for cf in cfs {
+                let task = CompactTask::CompactRangeCF {
+                    cf_name: String::from(cf),
+                    start_key: Some(start.clone()),
+                    end_key: Some(end.clone()),
+                };
+                if let Err(e) = self.compact_worker.schedule(task) {
+                    error!("failed to schedule compact region cf task: {}", e);
+                }
+            }
+        }
+    }
+
     fn on_compact_lock_cf(&mut self, event_loop: &mut EventLoop<Self>) {
         // Create a compact lock cf task(compact whole range) and schedule directly.
         let task = CompactTask::CompactRangeCF {
@@ -1556,6 +1573,9 @@ impl<T: Transport, C: PdClient> mio::Handler for Store<T, C> {
             }
             Msg::SnapGenRes { region_id, snap } => {
                 self.on_snap_gen_res(region_id, snap);
+            }
+            Msg::CompactRegion { region_id, cfs } => {
+                self.on_compact_region_cf(region_id, cfs);
             }
         }
         slow_log!(t, "handle {:?}", msg_str);

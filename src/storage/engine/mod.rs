@@ -73,6 +73,8 @@ pub trait Engine: Send + Debug {
         self.write(ctx, vec![Modify::Delete(cf, key)])
     }
 
+    fn compact(&self, ctx: &Context, cfs: Vec<CfName>) -> Result<()>;
+
     /// Create a share Engine pointer.
     fn clone(&self) -> Box<Engine + 'static>;
 }

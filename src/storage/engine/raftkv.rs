@@ -16,6 +16,7 @@ use server::transport::RaftStoreRouter;
 use raftstore::errors::Error as RaftServerError;
 use raftstore::coprocessor::{RegionSnapshot, RegionIterator};
 use raftstore::store::engine::Peekable;
+use raftstore::store::Msg;
 use kvproto::raft_cmdpb::{RaftCmdRequest, RaftCmdResponse, RaftRequestHeader, Request, Response,
                           CmdType, DeleteRequest, PutRequest};
 use kvproto::errorpb;
@@ -255,6 +256,14 @@ impl<S: RaftStoreRouter> Engine for RaftKv<S> {
                     cb(Err(e))
                 }
             }
+        }));
+        Ok(())
+    }
+
+    fn compact(&self, ctx: &Context, cfs: Vec<CfName>) -> engine::Result<()> {
+        box_try!(self.router.send(Msg::CompactRegion {
+            region_id: ctx.get_region_id(),
+            cfs: cfs,
         }));
         Ok(())
     }
