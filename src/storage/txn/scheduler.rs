@@ -40,6 +40,7 @@ use storage::{Engine, Command, Snapshot, StorageCb, Result as StorageResult,
 use kvproto::kvrpcpb::{Context, LockInfo};
 use storage::mvcc::{MvccTxn, MvccReader, Error as MvccError};
 use storage::{Key, Value, KvPair};
+use storage::{CF_DEFAULT, CF_WRITE};
 use std::collections::HashMap;
 use mio::{self, EventLoop};
 use util::transport::SendCh;
@@ -82,6 +83,7 @@ pub enum Msg {
     WritePrepareFailed { cid: u64, err: Error },
     WriteFinished {
         cid: u64,
+        cmd: Command,
         pr: ProcessResult,
         result: EngineResult<()>,
     },
@@ -154,6 +156,7 @@ pub struct RunningCtx {
     lock: Lock,
     callback: Option<StorageCb>,
     tag: &'static str,
+    write_total: u64,
     _timer: HistogramTimer,
 }
 
@@ -167,16 +170,22 @@ impl RunningCtx {
             lock: lock,
             callback: Some(cb),
             tag: tag,
+            write_total: 0,
             _timer: SCHED_HISTOGRAM_VEC.with_label_values(&[tag]).start_timer(),
         }
     }
 }
 
 /// Creates a callback to receive async results of write prepare from the storage engine.
-fn make_engine_cb(cid: u64, pr: ProcessResult, ch: SendCh<Msg>) -> EngineCallback<()> {
+fn make_engine_cb(cid: u64,
+                  cmd: Command,
+                  pr: ProcessResult,
+                  ch: SendCh<Msg>)
+                  -> EngineCallback<()> {
     Box::new(move |result: EngineResult<()>| {
         if let Err(e) = ch.send(Msg::WriteFinished {
             cid: cid,
+            cmd: cmd,
             pr: pr,
             result: result,
         }) {
@@ -555,12 +564,13 @@ impl Scheduler {
     /// Note that once a command is ready to execute, the snapshot is always up-to-date during the
     /// execution because 1) all the conflicting commands (if any) must be in the waiting queues;
     /// 2) there may be non-conflicitng commands running concurrently, but it doesn't matter.
-    fn on_receive_new_cmd(&mut self, cmd: Command, callback: StorageCb) {
+    fn on_receive_new_cmd(&mut self, cmd: Command, callback: StorageCb, write_total: u64) {
         SCHED_STAGE_COUNTER_VEC.with_label_values(&[cmd.tag(), "new"]).inc();
         let cid = self.gen_id();
         debug!("received new command, cid={}, cmd={}", cid, cmd);
         let lock = self.gen_lock(&cmd);
-        let ctx = RunningCtx::new(cid, cmd, lock, callback);
+        let mut ctx = RunningCtx::new(cid, cmd, lock, callback);
+        ctx.write_total = write_total;
         self.insert_ctx(ctx);
 
         if self.acquire_lock(cid) {
@@ -620,7 +630,7 @@ impl Scheduler {
         let cb = ctx.callback.take().unwrap();
         if let ProcessResult::NextCommand { cmd } = pr {
             SCHED_STAGE_COUNTER_VEC.with_label_values(&[ctx.tag, "next_cmd"]).inc();
-            self.on_receive_new_cmd(cmd, cb);
+            self.on_receive_new_cmd(cmd, cb, ctx.write_total);
         } else {
             execute_callback(cb, pr);
         }
@@ -654,10 +664,11 @@ impl Scheduler {
                                  to_be_write: Vec<Modify>) {
         SCHED_STAGE_COUNTER_VEC.with_label_values(&[self.get_ctx_tag(cid), "write"]).inc();
         if to_be_write.is_empty() {
-            return self.on_write_finished(cid, pr, Ok(()));
+            return self.on_write_finished(cid, cmd, pr, Ok(()));
         }
-        let engine_cb = make_engine_cb(cid, pr, self.schedch.clone());
-        if let Err(e) = self.engine.async_write(extract_ctx(&cmd), to_be_write, engine_cb) {
+        let ctx = extract_ctx(&cmd).to_owned();
+        let engine_cb = make_engine_cb(cid, cmd, pr, self.schedch.clone());
+        if let Err(e) = self.engine.async_write(&ctx, to_be_write, engine_cb) {
             let mut ctx = self.remove_ctx(cid);
             let cb = ctx.callback.take().unwrap();
             execute_callback(cb, ProcessResult::Failed { err: StorageError::from(e) });
@@ -667,7 +678,11 @@ impl Scheduler {
     }
 
     /// Event handler for the success of write.
-    fn on_write_finished(&mut self, cid: u64, pr: ProcessResult, result: EngineResult<()>) {
+    fn on_write_finished(&mut self,
+                         cid: u64,
+                         cmd: Command,
+                         pr: ProcessResult,
+                         result: EngineResult<()>) {
         SCHED_STAGE_COUNTER_VEC.with_label_values(&[self.get_ctx_tag(cid), "write_finish"]).inc();
         debug!("write finished for command, cid={}", cid);
         let mut ctx = self.remove_ctx(cid);
@@ -678,9 +693,14 @@ impl Scheduler {
         };
         if let ProcessResult::NextCommand { cmd } = pr {
             SCHED_STAGE_COUNTER_VEC.with_label_values(&[ctx.tag, "next_cmd"]).inc();
-            self.on_receive_new_cmd(cmd, cb);
+            self.on_receive_new_cmd(cmd, cb, ctx.write_total);
         } else {
             execute_callback(cb, pr);
+            if ctx.write_total > 10240 {
+                if let Command::Gc { ctx, .. } = cmd {
+                    self.engine.compact(&ctx, vec![CF_DEFAULT, CF_WRITE]).unwrap();
+                }
+            }
         }
 
         self.release_lock(&ctx.lock, cid);
@@ -717,14 +737,16 @@ impl mio::Handler for Scheduler {
     fn notify(&mut self, event_loop: &mut EventLoop<Self>, msg: Msg) {
         match msg {
             Msg::Quit => self.shutdown(event_loop),
-            Msg::RawCmd { cmd, cb } => self.on_receive_new_cmd(cmd, cb),
+            Msg::RawCmd { cmd, cb } => self.on_receive_new_cmd(cmd, cb, 0),
             Msg::SnapshotFinished { cid, snapshot } => self.on_snapshot_finished(cid, snapshot),
             Msg::ReadFinished { cid, pr } => self.on_read_finished(cid, pr),
             Msg::WritePrepareFinished { cid, cmd, pr, to_be_write } => {
                 self.on_write_prepare_finished(cid, cmd, pr, to_be_write)
             }
             Msg::WritePrepareFailed { cid, err } => self.on_write_prepare_failed(cid, err),
-            Msg::WriteFinished { cid, pr, result } => self.on_write_finished(cid, pr, result),
+            Msg::WriteFinished { cid, cmd, pr, result } => {
+                self.on_write_finished(cid, cmd, pr, result)
+            }
         }
     }
 
