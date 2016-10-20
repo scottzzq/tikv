@@ -527,9 +527,6 @@ quick_error! {
             cause(err)
             description(err.description())
         }
-        SchedulerBusy {
-            description("scheduler is busy")
-        }
     }
 }
 
